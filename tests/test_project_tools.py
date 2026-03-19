@@ -4,6 +4,7 @@ Integration tests for the full project workflow through QdrantMCPServer MCP tool
 Tests use in-memory Qdrant + FastEmbed + temp directories for project config.
 Tools are invoked via fastmcp.Client to test the complete end-to-end flow.
 """
+import json
 import uuid
 
 import pytest
@@ -83,12 +84,17 @@ async def test_init_project_creates_config_and_collection(mcp_server, tmp_projec
     assert project_name in text
     assert "initialized" in text.lower()
 
-    # Config file created
-    config = load_project_config(tmp_project_dir)
-    assert config is not None
-    assert config.project_name == project_name
-    assert config.collection == f"proj_{project_name}"
-    assert config.linked_collections == []
+    # Response contains config JSON for client to persist
+    assert ".qdrant-project.json" in text
+    assert f"proj_{project_name}" in text
+
+    # Parse the JSON block from the response
+    json_start = text.index("```json\n") + len("```json\n")
+    json_end = text.index("\n```", json_start)
+    config = json.loads(text[json_start:json_end])
+    assert config["project_name"] == project_name
+    assert config["collection"] == f"proj_{project_name}"
+    assert config["linked_collections"] == []
 
     # Collection exists in Qdrant
     assert await mcp_server.qdrant_connector._client.collection_exists(
@@ -132,11 +138,13 @@ async def test_init_project_default_collection_name(mcp_server, tmp_project_dir)
     project_name = f"myapp_{uuid.uuid4().hex[:6]}"
 
     async with Client(mcp_server) as client:
-        await client.call_tool("qdrant-init-project", {"project_name": project_name})
+        result = await client.call_tool("qdrant-init-project", {"project_name": project_name})
 
-    config = load_project_config(tmp_project_dir)
-    assert config is not None
-    assert config.collection == f"proj_{project_name}"
+    text = result[0].text
+    json_start = text.index("```json\n") + len("```json\n")
+    json_end = text.index("\n```", json_start)
+    config = json.loads(text[json_start:json_end])
+    assert config["collection"] == f"proj_{project_name}"
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +154,11 @@ async def test_init_project_default_collection_name(mcp_server, tmp_project_dir)
 
 @pytest.mark.asyncio
 async def test_init_project_already_exists_error(mcp_server):
-    """Init project twice: second call returns an already-initialized message."""
+    """Init project twice: second call returns an already-initialized message.
+
+    Note: since the server no longer writes to disk, the "already initialized"
+    check is based on in-memory state (self.project_config).
+    """
     project_name = f"dup_{uuid.uuid4().hex[:6]}"
 
     async with Client(mcp_server) as client:
@@ -181,9 +193,12 @@ async def test_link_collection(mcp_server, tmp_project_dir):
     assert knowledge_col in text
     assert "linked" in text.lower()
 
-    config = load_project_config(tmp_project_dir)
-    assert config is not None
-    assert knowledge_col in config.linked_collections
+    # Response contains updated config JSON for client to persist
+    assert ".qdrant-project.json" in text
+    json_start = text.index("```json\n") + len("```json\n")
+    json_end = text.index("\n```", json_start)
+    config = json.loads(text[json_start:json_end])
+    assert knowledge_col in config["linked_collections"]
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +239,9 @@ async def test_link_duplicate_is_idempotent(mcp_server, tmp_project_dir):
         await client.call_tool("qdrant-link", {"collection_name": col})
         await client.call_tool("qdrant-link", {"collection_name": col})
 
-    config = load_project_config(tmp_project_dir)
-    assert config is not None
-    assert config.linked_collections.count(col) == 1
+    # In-memory config should have no duplicate
+    assert mcp_server.project_config is not None
+    assert mcp_server.project_config.linked_collections.count(col) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -247,11 +262,15 @@ async def test_unlink_collection(mcp_server, tmp_project_dir):
         await client.call_tool("qdrant-link", {"collection_name": col})
         result = await client.call_tool("qdrant-unlink", {"collection_name": col})
 
-    assert "unlinked" in result[0].text.lower()
+    text = result[0].text
+    assert "unlinked" in text.lower()
 
-    config = load_project_config(tmp_project_dir)
-    assert config is not None
-    assert col not in config.linked_collections
+    # Response contains updated config JSON for client to persist
+    assert ".qdrant-project.json" in text
+    json_start = text.index("```json\n") + len("```json\n")
+    json_end = text.index("\n```", json_start)
+    config = json.loads(text[json_start:json_end])
+    assert col not in config["linked_collections"]
 
 
 # ---------------------------------------------------------------------------

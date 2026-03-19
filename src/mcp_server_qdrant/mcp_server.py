@@ -21,7 +21,6 @@ from mcp_server_qdrant.settings import (
     QdrantSettings,
     ToolSettings,
     load_project_config,
-    save_project_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -296,8 +295,8 @@ class QdrantMCPServer(FastMCP):
 
             project_dir = self._get_project_dir()
 
-            # Check if already initialized
-            existing = load_project_config(project_dir)
+            # Check if already initialized (in-memory or on disk)
+            existing = self.project_config or load_project_config(project_dir)
             if existing is not None:
                 return (
                     f"Project already initialized: '{existing.project_name}' "
@@ -310,30 +309,35 @@ class QdrantMCPServer(FastMCP):
             # Create the collection in Qdrant
             await self.qdrant_connector.ensure_collection_exists(resolved_collection)
 
-            # Create and persist config
+            # Update in-memory config
             config = ProjectConfig(
                 project_name=project_name,
                 collection=resolved_collection,
                 linked_collections=[],
             )
-            save_project_config(config, project_dir)
             self.project_config = config
 
             # List all collections for the user to link if desired
             all_collections = await self.qdrant_connector.get_collection_names()
             other_collections = [c for c in all_collections if c != resolved_collection]
 
+            config_json = config.model_dump_json(indent=2)
+
             lines = [
                 f"Project '{project_name}' initialized.",
                 f"  Collection: {resolved_collection}",
+                "",
+                "Please create a `.qdrant-project.json` file in the project root with the following content:",
+                "",
+                f"```json\n{config_json}\n```",
             ]
             if other_collections:
                 lines.append(
-                    "Available collections to link: "
+                    "\nAvailable collections to link (use qdrant-link): "
                     + ", ".join(other_collections)
                 )
             else:
-                lines.append("No other collections available to link.")
+                lines.append("\nNo other collections available to link.")
             return "\n".join(lines)
 
         async def qdrant_create_collection(
@@ -408,12 +412,14 @@ class QdrantMCPServer(FastMCP):
                     linked_collections=self.project_config.linked_collections
                     + [collection_name],
                 )
-                save_project_config(updated, self._get_project_dir())
                 self.project_config = updated
 
+            config_json = self.project_config.model_dump_json(indent=2)
             return (
                 f"Collection '{collection_name}' linked to project '{self.project_config.project_name}'.\n"
-                f"Linked collections: {', '.join(self.project_config.linked_collections)}"
+                f"Linked collections: {', '.join(self.project_config.linked_collections)}\n\n"
+                f"Please update `.qdrant-project.json` in the project root with:\n\n"
+                f"```json\n{config_json}\n```"
             )
 
         async def qdrant_unlink(
@@ -446,7 +452,6 @@ class QdrantMCPServer(FastMCP):
                 collection=self.project_config.collection,
                 linked_collections=new_linked,
             )
-            save_project_config(updated, self._get_project_dir())
             self.project_config = updated
 
             remaining = (
@@ -454,9 +459,12 @@ class QdrantMCPServer(FastMCP):
                 if self.project_config.linked_collections
                 else "none"
             )
+            config_json = self.project_config.model_dump_json(indent=2)
             return (
                 f"Collection '{collection_name}' unlinked from project '{self.project_config.project_name}'.\n"
-                f"Remaining linked collections: {remaining}"
+                f"Remaining linked collections: {remaining}\n\n"
+                f"Please update `.qdrant-project.json` in the project root with:\n\n"
+                f"```json\n{config_json}\n```"
             )
 
         async def qdrant_project_info(ctx: Context) -> str:

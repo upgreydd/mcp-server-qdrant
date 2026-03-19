@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -21,6 +22,17 @@ class Entry(BaseModel):
 
     content: str
     metadata: Metadata | None = None
+
+
+class ScoredEntry(BaseModel):
+    """
+    An entry in the Qdrant collection with a relevance score and the collection it came from.
+    """
+
+    content: str
+    metadata: Metadata | None = None
+    score: float
+    collection_name: str
 
 
 class QdrantConnector:
@@ -69,7 +81,7 @@ class QdrantConnector:
         """
         collection_name = collection_name or self._default_collection_name
         assert collection_name is not None
-        await self._ensure_collection_exists(collection_name)
+        await self.ensure_collection_exists(collection_name)
 
         # Embed the document
         # ToDo: instead of embedding text explicitly, use `models.Document`,
@@ -137,7 +149,80 @@ class QdrantConnector:
             for result in search_results.points
         ]
 
-    async def _ensure_collection_exists(self, collection_name: str):
+    async def search_multiple(
+        self,
+        query: str,
+        *,
+        collection_names: list[str],
+        limit: int = 10,
+        query_filter: models.Filter | None = None,
+    ) -> list[ScoredEntry]:
+        """
+        Search across multiple Qdrant collections and return results with scores,
+        sorted by relevance score descending.
+        :param query: The query to use for the search.
+        :param collection_names: The names of the collections to search in.
+        :param limit: The maximum number of total entries to return. Each collection is
+                      queried for up to `limit` results, then all results are merged and
+                      truncated to `limit` globally.
+        :param query_filter: The filter to apply to the query, if any.
+        :return: A list of ScoredEntry objects sorted by score descending, capped at `limit`.
+        """
+        query_vector = await self._embedding_provider.embed_query(query)
+        vector_name = self._embedding_provider.get_vector_name()
+
+        async def _search_one(collection_name: str) -> list[ScoredEntry]:
+            try:
+                collection_exists = await self._client.collection_exists(collection_name)
+                if not collection_exists:
+                    return []
+                search_results = await self._client.query_points(
+                    collection_name=collection_name,
+                    query=query_vector,
+                    using=vector_name,
+                    limit=limit,
+                    query_filter=query_filter,
+                    with_payload=True,
+                )
+                return [
+                    ScoredEntry(
+                        content=result.payload["document"],
+                        metadata=result.payload.get("metadata"),
+                        score=result.score,
+                        collection_name=collection_name,
+                    )
+                    for result in search_results.points
+                ]
+            except Exception:
+                logger.exception("Error searching collection %s", collection_name)
+                return []
+
+        per_collection = await asyncio.gather(
+            *[_search_one(name) for name in collection_names]
+        )
+        results: list[ScoredEntry] = [entry for batch in per_collection for entry in batch]
+        results.sort(key=lambda e: e.score, reverse=True)
+        return results[:limit]
+
+    async def get_collection_info(self, collection_name: str) -> dict[str, Any] | None:
+        """
+        Get information about a Qdrant collection.
+        :param collection_name: The name of the collection to get information for.
+        :return: A dict with collection info, or None if the collection does not exist.
+        """
+        collection_exists = await self._client.collection_exists(collection_name)
+        if not collection_exists:
+            return None
+
+        info = await self._client.get_collection(collection_name)
+        return {
+            "name": collection_name,
+            "indexed_vectors_count": info.indexed_vectors_count,
+            "points_count": info.points_count,
+            "status": str(info.status),
+        }
+
+    async def ensure_collection_exists(self, collection_name: str):
         """
         Ensure that the collection exists, creating it if necessary.
         :param collection_name: The name of the collection to ensure exists.

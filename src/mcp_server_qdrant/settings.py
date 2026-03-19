@@ -1,3 +1,6 @@
+import json
+import tempfile
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -113,3 +116,58 @@ class QdrantSettings(BaseSettings):
                     "If 'local_path' is set, 'location' and 'api_key' must be None."
                 )
         return self
+
+
+PROJECT_CONFIG_FILENAME = ".qdrant-project.json"
+
+
+class ProjectConfig(BaseModel):
+    project_name: str
+    collection: str
+    linked_collections: list[str] = []
+
+
+class ProjectSettings(BaseSettings):
+    project_dir: str | None = Field(
+        default=None, validation_alias="QDRANT_PROJECT_DIR"
+    )
+
+    @property
+    def resolved_project_dir(self) -> Path:
+        if self.project_dir is not None:
+            return Path(self.project_dir)
+        return Path.cwd()
+
+
+def load_project_config(project_dir: Path | None = None) -> ProjectConfig | None:
+    """
+    Reads .qdrant-project.json from project_dir (or cwd).
+    Returns None if file doesn't exist, raises on malformed JSON.
+    """
+    base = project_dir if project_dir is not None else Path.cwd()
+    config_path = base / PROJECT_CONFIG_FILENAME
+    if not config_path.exists():
+        return None
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    return ProjectConfig(**data)
+
+
+def save_project_config(config: ProjectConfig, project_dir: Path | None = None) -> None:
+    """
+    Writes config as formatted JSON to .qdrant-project.json using an atomic
+    write pattern (write to temp file + rename) to prevent corruption.
+    """
+    base = project_dir if project_dir is not None else Path.cwd()
+    base.mkdir(parents=True, exist_ok=True)
+    config_path = base / PROJECT_CONFIG_FILENAME
+    content = config.model_dump_json(indent=2)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=base,
+        delete=False,
+        suffix=".tmp",
+    ) as tmp_file:
+        tmp_file.write(content)
+        tmp_path = Path(tmp_file.name)
+    tmp_path.replace(config_path)

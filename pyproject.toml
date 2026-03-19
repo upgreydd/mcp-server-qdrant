@@ -1,7 +1,7 @@
 [project]
-name = "mcp-server-qdrant"
+name = "mcp-server-qdrant-multicollection"
 version = "0.8.1"
-description = "MCP server for retrieving context from a Qdrant vector database"
+description = "MCP server for Qdrant with project-aware multi-collection support"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
